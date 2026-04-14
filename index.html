@@ -94,6 +94,16 @@ const API={
   },
   async createCaja(name,type,icon,assignedTo,createdBy){const{data,error}=await sb.from("cajas").insert({name,type,icon:icon||"💰",assigned_to:assignedTo||null,created_by:createdBy}).select().single();if(error)throw error;return data;},
   async toggleCaja(id,active){await sb.from("cajas").update({is_active:active}).eq("id",id);},
+  async deleteCaja(id){
+    // Remove caja reference from transactions first, then delete
+    await sb.from("transactions").update({caja_id:null}).eq("caja_id",id);
+    const{error}=await sb.from("cajas").delete().eq("id",id);
+    if(error)throw error;
+  },
+  async updateCaja(id,updates){
+    const{error}=await sb.from("cajas").update(updates).eq("id",id);
+    if(error)throw error;
+  },
   // Users: admin only sees their team
   async getUsers(adminId){
     const{data}=await sb.from("users").select("id,name,username,role,phone,is_active,created_at")
@@ -262,6 +272,7 @@ function UsersScreen({adminId,onBack}){
 /* ═══ CAJAS MANAGEMENT ═══ */
 function CajasScreen({adminId,onBack}){
   const[cajas,setCajas]=useState([]);const[users,setUsers]=useState([]);const[ld,setLd]=useState(true);const[show,setShow]=useState(false);
+  const[editId,setEditId]=useState(null);
   const[cn,setCn]=useState("");const[ct,setCt]=useState("efectivo");const[ci,setCi]=useState("💰");const[ca,setCa]=useState("");
   const[saving,setSaving]=useState(false);const[toast,setToast]=useState(null);
   const ICONS=["💰","🔐","💵","🏦","📱","📲","💳","🏠","🚗","📦"];
@@ -269,8 +280,32 @@ function CajasScreen({adminId,onBack}){
   const load=async()=>{const[c,u]=await Promise.all([API.getAllCajas(adminId),API.getUsers(adminId)]);setCajas(c);setUsers(u.filter(u=>u.is_active));setLd(false);};
   useEffect(()=>{load();},[]);
   const sT=m=>{setToast(m);setTimeout(()=>setToast(null),2500);};
-  const add=async()=>{if(!cn.trim())return;setSaving(true);try{await API.createCaja(cn.trim(),ct,ci,ca||null,adminId);setCn("");setCt("efectivo");setCi("💰");setCa("");setShow(false);sT("✅ Caja creada");await load();}catch(e){sT("⚠️ "+e.message);}setSaving(false);};
-  const tog=async(id,a)=>{if(!confirm(a?"¿Desactivar caja?":"¿Activar caja?"))return;await API.toggleCaja(id,!a);sT(a?"Desactivada":"Activada");await load();};
+
+  const openNew=()=>{setEditId(null);setCn("");setCt("efectivo");setCi("💰");setCa("");setShow(true);};
+  const openEdit=(c)=>{setEditId(c.id);setCn(c.name);setCt(c.type);setCi(c.icon||"💰");setCa(c.assigned_to||"");setShow(true);};
+
+  const saveForm=async()=>{
+    if(!cn.trim())return;setSaving(true);
+    try{
+      if(editId){
+        await API.updateCaja(editId,{name:cn.trim(),type:ct,icon:ci,assigned_to:ca||null});
+        sT("✅ Caja actualizada");
+      }else{
+        await API.createCaja(cn.trim(),ct,ci,ca||null,adminId);
+        sT("✅ Caja creada");
+      }
+      setCn("");setCt("efectivo");setCi("💰");setCa("");setEditId(null);setShow(false);await load();
+    }catch(e){sT("⚠️ "+(e.message||"Error"));}
+    setSaving(false);
+  };
+
+  const del=async(id,name)=>{
+    if(!confirm(`¿Eliminar la caja "${name}"?\n\nLas transacciones asociadas no se borran, pero quedarán sin caja asignada.`))return;
+    try{await API.deleteCaja(id);sT("🗑️ Caja eliminada");await load();}catch(e){sT("⚠️ "+e.message);}
+  };
+
+  const si={input:{width:"100%",padding:"12px 14px",border:"2px solid #e8e6df",borderRadius:12,fontSize:16,fontFamily:F,marginBottom:14,background:"#fff",color:"#1a1a1a"},
+    label:{fontSize:12,fontWeight:700,color:"#8696a0",textTransform:"uppercase",letterSpacing:1,display:"block",marginBottom:4}};
 
   return ce("div",{style:{height:"100vh",display:"flex",flexDirection:"column",fontFamily:F}},
     toast&&ce("div",{style:{position:"fixed",top:16,left:"50%",transform:"translateX(-50%)",background:"#075e54",color:"#fff",padding:"10px 22px",borderRadius:10,fontSize:14,fontWeight:700,zIndex:999,boxShadow:"0 4px 20px rgba(0,0,0,0.2)"}},toast),
@@ -279,28 +314,30 @@ function CajasScreen({adminId,onBack}){
       ce("div",null,ce("div",{style:{color:"#fff",fontSize:17,fontWeight:700}},"Cajas y Cuentas"),ce("div",{style:{color:"#a8d8c8",fontSize:13,fontWeight:600}},cajas.filter(c=>c.is_active).length+" activas"))),
     ce("div",{style:{flex:1,overflow:"auto",padding:"12px 14px",background:"#f4f3ef"}},
       ld?ce("div",{style:{textAlign:"center",padding:40,color:"#999"}},"Cargando..."):ce("div",null,
-        ce("button",{style:{width:"100%",padding:14,borderRadius:14,border:"2px dashed #c8c5bd",background:"transparent",fontSize:15,fontWeight:700,color:"#075e54",cursor:"pointer",fontFamily:F,marginBottom:12},onClick:()=>setShow(true)},"＋ Nueva caja o cuenta"),
-        cajas.map(c=>{const bal= 0;
+        ce("button",{style:{width:"100%",padding:14,borderRadius:14,border:"2px dashed #c8c5bd",background:"transparent",fontSize:15,fontWeight:700,color:"#075e54",cursor:"pointer",fontFamily:F,marginBottom:12},onClick:openNew},"＋ Nueva caja o cuenta"),
+        cajas.map(c=>{
           return ce("div",{key:c.id,style:{background:"#fff",borderRadius:14,padding:"16px",marginBottom:8,boxShadow:"0 1px 3px rgba(0,0,0,0.04)",opacity:c.is_active?1:.5}},
-            ce("div",{style:{display:"flex",alignItems:"center",gap:12,marginBottom:8}},
+            ce("div",{style:{display:"flex",alignItems:"center",gap:12}},
               ce("div",{style:{fontSize:28}},c.icon||"💰"),
               ce("div",{style:{flex:1}},
                 ce("div",{style:{fontSize:16,fontWeight:700,color:"#1a1a1a"}},c.name),
                 ce("div",{style:{fontSize:12,color:"#8696a0"}},c.users?.name?`👤 ${c.users.name}`:"Sin asignar"," · ",TICONS[c.type]||""," ",c.type)),
-              ce("button",{style:{padding:"6px 12px",borderRadius:8,border:"none",fontSize:12,fontWeight:700,cursor:"pointer",fontFamily:F,background:c.is_active?"#fce4ec":"#e8f5e9",color:c.is_active?"#c62828":"#0d7a3e"},onClick:()=>tog(c.id,c.is_active)},c.is_active?"Desact.":"Activar")))}))),
+              ce("div",{style:{display:"flex",gap:4}},
+                ce("button",{style:{padding:"6px 10px",borderRadius:8,border:"none",fontSize:14,cursor:"pointer",background:"#e3f2fd"},onClick:()=>openEdit(c),title:"Editar"},"✏️"),
+                ce("button",{style:{padding:"6px 10px",borderRadius:8,border:"none",fontSize:14,cursor:"pointer",background:"#fce4ec"},onClick:()=>del(c.id,c.name),title:"Eliminar"},"🗑️"))))}))),
     show&&ce("div",{style:{position:"fixed",top:0,left:0,right:0,bottom:0,background:"rgba(0,0,0,0.4)",display:"flex",alignItems:"flex-end",justifyContent:"center",zIndex:100},onClick:()=>setShow(false)},
       ce("div",{style:{background:"#fff",borderRadius:"20px 20px 0 0",padding:"24px 20px 32px",width:"100%",maxWidth:480,maxHeight:"85vh",overflow:"auto"},onClick:e=>e.stopPropagation()},
-        ce("div",{style:{fontSize:18,fontWeight:800,marginBottom:16}},"Nueva caja o cuenta"),
-        ce("label",{style:{fontSize:12,fontWeight:700,color:"#8696a0",textTransform:"uppercase",letterSpacing:1,display:"block",marginBottom:4}},"Nombre *"),
-        ce("input",{style:{width:"100%",padding:"12px 14px",border:"2px solid #e8e6df",borderRadius:12,fontSize:16,fontFamily:F,marginBottom:14},placeholder:'Ej: Caja fuerte oficina...',value:cn,onChange:e=>setCn(e.target.value)}),
-        ce("label",{style:{fontSize:12,fontWeight:700,color:"#8696a0",textTransform:"uppercase",letterSpacing:1,display:"block",marginBottom:4}},"Tipo"),
+        ce("div",{style:{fontSize:18,fontWeight:800,marginBottom:16}},editId?"Editar caja":"Nueva caja o cuenta"),
+        ce("label",{style:si.label},"Nombre *"),
+        ce("input",{style:si.input,placeholder:'Ej: Caja fuerte oficina...',value:cn,onChange:e=>setCn(e.target.value)}),
+        ce("label",{style:si.label},"Tipo"),
         ce("div",{style:{display:"flex",gap:6,flexWrap:"wrap",marginBottom:14}},TYPES.map(([v,l])=>ce("button",{key:v,style:{padding:"8px 14px",borderRadius:10,border:ct===v?"2px solid #075e54":"2px solid #e8e6df",background:ct===v?"#e8f5e9":"#fff",fontSize:13,fontWeight:700,cursor:"pointer",fontFamily:F,color:ct===v?"#075e54":"#666"},onClick:()=>setCt(v)},l))),
-        ce("label",{style:{fontSize:12,fontWeight:700,color:"#8696a0",textTransform:"uppercase",letterSpacing:1,display:"block",marginBottom:4}},"Ícono"),
+        ce("label",{style:si.label},"Ícono"),
         ce("div",{style:{display:"flex",gap:8,flexWrap:"wrap",marginBottom:14}},ICONS.map(ic=>ce("button",{key:ic,style:{width:42,height:42,borderRadius:10,border:ci===ic?"2px solid #075e54":"2px solid #e8e6df",background:ci===ic?"#e8f5e9":"#fff",fontSize:22,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center"},onClick:()=>setCi(ic)},ic))),
-        ce("label",{style:{fontSize:12,fontWeight:700,color:"#8696a0",textTransform:"uppercase",letterSpacing:1,display:"block",marginBottom:4}},"Responsable (opcional)"),
-        ce("select",{style:{width:"100%",padding:"12px 14px",border:"2px solid #e8e6df",borderRadius:12,fontSize:16,fontFamily:F,marginBottom:14,background:"#fff",color:"#1a1a1a"},value:ca,onChange:e=>setCa(e.target.value)},
+        ce("label",{style:si.label},"Responsable (opcional)"),
+        ce("select",{style:{...si.input,marginBottom:14},value:ca,onChange:e=>setCa(e.target.value)},
           ce("option",{value:""},"Sin asignar (admin directo)"),users.map(u=>ce("option",{key:u.id,value:u.id},u.name))),
-        ce("button",{style:{width:"100%",padding:14,borderRadius:14,border:"none",background:"#075e54",color:"#fff",fontSize:16,fontWeight:700,cursor:"pointer",fontFamily:F,opacity:cn.trim()?1:.4},onClick:add,disabled:saving},saving?"Guardando...":"Crear caja"),
+        ce("button",{style:{width:"100%",padding:14,borderRadius:14,border:"none",background:"#075e54",color:"#fff",fontSize:16,fontWeight:700,cursor:"pointer",fontFamily:F,opacity:cn.trim()?1:.4},onClick:saveForm,disabled:saving},saving?"Guardando...":(editId?"Guardar cambios":"Crear caja")),
         ce("button",{style:{width:"100%",padding:12,border:"none",background:"transparent",color:"#8696a0",fontSize:15,fontWeight:600,cursor:"pointer",fontFamily:F,marginTop:6},onClick:()=>setShow(false)},"Cancelar"))));
 }
 
@@ -507,23 +544,28 @@ function MainApp({user}){
           isA&&ce(Chip,{onClick:()=>startFlow("ingreso"),color:"#0d7a3e"},"💰 Ingreso"),
           ce(Chip,{onClick:()=>startFlow("salida"),color:"#c0392b"},"💸 Salida"),
           ce(Chip,{onClick:showSaldo,color:"#2980b9"},"📊 Saldo")),
-        flow==="pick_type"&&ce("div",{style:{display:"flex",gap:8,justifyContent:"center"}},
+        flow==="pick_type"&&ce("div",{style:{display:"flex",gap:8,justifyContent:"center",flexWrap:"wrap"}},
           isA&&ce(Chip,{onClick:()=>pickType("ingreso"),color:"#0d7a3e"},"💰 Ingreso"),
-          ce(Chip,{onClick:()=>pickType("salida"),color:"#c0392b"},"💸 Salida")),
-        flow==="pick_amount"&&ce("div",{style:{display:"flex",gap:8,overflowX:"auto",padding:"2px 0"}},[5e5,1e6,2e6,3e6,5e6,10e6,15e6,20e6,50e6,1e8].map(v=>ce(Chip,{key:v,onClick:()=>pickAmt(v),color:"#0d7a3e"},fmtS(v)))),
-        flow==="pick_caja"&&ce("div",{style:{display:"flex",gap:8,overflowX:"auto",padding:"2px 0"}},
+          ce(Chip,{onClick:()=>pickType("salida"),color:"#c0392b"},"💸 Salida"),
+          ce(Chip,{onClick:cancelF,color:"#999"},"✕ Cancelar")),
+        flow==="pick_amount"&&ce("div",{style:{display:"flex",gap:8,overflowX:"auto",padding:"2px 0",alignItems:"center"}},
+          [5e5,1e6,2e6,3e6,5e6,10e6,15e6,20e6,50e6,1e8].map(v=>ce(Chip,{key:v,onClick:()=>pickAmt(v),color:"#0d7a3e"},fmtS(v))),
+          ce(Chip,{key:"cancel",onClick:cancelF,color:"#999"},"✕")),
+        flow==="pick_caja"&&ce("div",{style:{display:"flex",gap:8,overflowX:"auto",padding:"2px 0",alignItems:"center"}},
           activeCajas.map(c=>ce(Chip,{key:c.caja_id,onClick:()=>pickCaja(c),color:"#075e54"},`${c.icon} ${c.caja_name}`)),
           ce(Chip,{key:"efe",onClick:()=>{setDraft(d=>({...d,note:"Efectivo",resolvedMethod:"efectivo"}));pickCaja(null,{icon:"💵",label:"Efectivo"});},color:"#666"},"💵 Efectivo"),
           ce(Chip,{key:"neq",onClick:()=>{setDraft(d=>({...d,note:"Nequi",resolvedMethod:"nequi"}));pickCaja(null,{icon:"📱",label:"Nequi"});},color:"#666"},"📱 Nequi"),
           ce(Chip,{key:"dav",onClick:()=>{setDraft(d=>({...d,note:"Daviplata",resolvedMethod:"daviplata"}));pickCaja(null,{icon:"📲",label:"Daviplata"});},color:"#666"},"📲 Daviplata"),
           ce(Chip,{key:"ban",onClick:()=>{setDraft(d=>({...d,note:"Bancolombia",resolvedMethod:"transferencia"}));pickCaja(null,{icon:"🏦",label:"Bancolombia"});},color:"#666"},"🏦 Banco"),
-          ce(Chip,{key:"none",onClick:()=>pickCaja(null),color:"#999"},"💼 Sin caja")),
+          ce(Chip,{key:"none",onClick:()=>pickCaja(null),color:"#999"},"💼 Sin caja"),
+          ce(Chip,{key:"cancel",onClick:cancelF,color:"#999"},"✕")),
         flow==="confirm"&&ce("div",{style:{display:"flex",gap:8,justifyContent:"center"}},
           ce(Chip,{onClick:confirmF,color:"#0d7a3e",active:true},"✓ Confirmar"),
           ce(Chip,{onClick:()=>{pushB(messages,"📝 Escribe la nota:");setFlow("add_note");},color:"#2980b9"},"📝 Nota"),
           ce(Chip,{onClick:cancelF,color:"#999"},"✕ Cancelar")),
         flow==="add_note"&&ce("div",{style:{display:"flex",gap:8,justifyContent:"center"}},
-          ce(Chip,{onClick:()=>{setFlow("confirm");pushB(messages,"OK, sin nota. ¿Confirmar?");},color:"#999"},"Saltar"))),
+          ce(Chip,{onClick:()=>{setFlow("confirm");pushB(messages,"OK, sin nota. ¿Confirmar?");},color:"#999"},"Saltar"),
+          ce(Chip,{onClick:cancelF,color:"#999"},"✕ Cancelar"))),
       ce("div",{key:"ib",style:{display:"flex",alignItems:"center",gap:8,padding:"6px 10px 10px",background:"#f0ede8",flexShrink:0}},
         ce("input",{type:"text",style:{flex:1,padding:"11px 16px",border:"none",borderRadius:22,fontSize:15,fontFamily:F,background:"#fff",color:"#1a1a1a"},placeholder:"Escribe o usa los botones...",value:input,onChange:e=>setInput(e.target.value),onKeyDown:e=>{if(e.key==="Enter"){e.preventDefault();handleSend();}}}),
         ce("button",{style:{width:44,height:44,borderRadius:"50%",border:"none",background:"#25d366",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,opacity:input.trim()?1:.35},onClick:handleSend,disabled:!input.trim()},
