@@ -1,5 +1,0 @@
-{
-  "name": "miscuentas",
-  "private": true,
-  "type": "module"
-}
