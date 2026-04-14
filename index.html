@@ -427,6 +427,9 @@ function MainApp({user}){
   };
 
   const handleSend=()=>{const text=input.trim();if(!text)return;setInput("");const msgs=pushU(messages,text);
+    // Universal cancel — works in ANY active flow
+    if(flow!=="idle"&&/^(cancelar|cancelado|cancela|x|ya\s*no|no\s*va|dejalo|déjalo|olvid|olv[ií]da|nada|nel|stop|parar|pare|borra|quit)$/i.test(text)){cancelF();return;}
+    if(flow!=="idle"&&/^(no$|no\s+quiero|no\s+gracias|mejor\s+no)$/i.test(text)){cancelF();return;}
     // Context-aware: if in a flow, handle within that context
     if(flow==="pick_type"){
       if(/ingreso|entrada|entr|recib|cobr|lleg/i.test(text)){
