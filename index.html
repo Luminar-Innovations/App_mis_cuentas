@@ -276,9 +276,10 @@ function MainApp({user}){
   const activeCajas=cajas.filter(c=>c.is_active);
 
   const saveRec=async(tipo,amount,caja,note="")=>{
-    try{await API.addTx(user.id,tipo,amount,caja.caja_id,note,"web");await refresh();
+    try{await API.addTx(user.id,tipo,amount,caja?.caja_id||null,note,"web");await refresh();
       const icon=tipo==="ingreso"?"✅":"📤",lab=tipo==="ingreso"?"INGRESO":"SALIDA";
-      pushB(messages,`${icon} ${lab} registrado\n\n💵 ${fmt(amount)}\n${caja.icon} ${caja.caja_name}${note?`\n📝 ${note}`:""}\n👤 ${user.name}`);
+      const cajaLine=caja?`\n${caja.icon} ${caja.caja_name}`:"";
+      pushB(messages,`${icon} ${lab} registrado\n\n💵 ${fmt(amount)}${cajaLine}${note?`\n📝 ${note}`:""}\n👤 ${user.name}`);
     }catch{pushB(messages,"⚠️ Error. Intenta de nuevo.");}
     setFlow("idle");setDraft({tipo:null,amount:null,caja:null,note:""});
   };
@@ -290,25 +291,44 @@ function MainApp({user}){
     pushB(messages,t);
   };
 
-  const handleSend=()=>{const text=input.trim();if(!text)return;setInput("");const msgs=pushU(messages,text);const p=parseMsg(text);
+  const handleSend=()=>{const text=input.trim();if(!text)return;setInput("");const msgs=pushU(messages,text);
+    // Context-aware: if in a flow, try to match the flow first
+    if(flow==="pick_type"){
+      if(/ingreso|entrada|entr/i.test(text)){pickType("ingreso");return;}
+      if(/salida|pago|gasto|pagu/i.test(text)){pickType("salida");return;}
+    }
+    if(flow==="pick_caja"){
+      if(/sin\s*caja|ninguna|directo|no/i.test(text)){pickCaja(null);return;}
+      const match=activeCajas.find(c=>text.toLowerCase().includes(c.caja_name.toLowerCase()));
+      if(match){pickCaja(match);return;}
+    }
+    if(flow==="confirm"){
+      if(/si|sí|ok|confirmar|dale|listo/i.test(text)){confirmF();return;}
+      if(/no|cancelar|cancel/i.test(text)){cancelF();return;}
+    }
+    const p=parseMsg(text);
     if(!p){pushB(msgs,"🤔 No entendí. Prueba:\n\"Entraron 5 millones\"\n\"Pagué 2M\"");return;}
     if(p.type==="saldo"){showSaldo();return;}
     if(p.type==="need_type"){setDraft({tipo:null,amount:p.amount,caja:null,note:p.note});pushB(msgs,`${fmt(p.amount)}. ¿Es ingreso o salida?`);setFlow("pick_type");return;}
     if(p.type==="need_caja"){
-      if(activeCajas.length===0){pushB(msgs,"⚠️ No hay cajas creadas. Pide al admin que cree una.");return;}
+      if(activeCajas.length===0){setDraft({tipo:p.tipo,amount:p.amount,caja:null,note:p.note});setFlow("confirm");pushB(msgs,`${fmt(p.amount)} · ${p.tipo}${p.note?` · ${p.note}`:""}\n\n¿Confirmar?`);return;}
       if(activeCajas.length===1){setDraft({tipo:p.tipo,amount:p.amount,caja:activeCajas[0],note:p.note});setFlow("confirm");pushB(msgs,`${fmt(p.amount)} · ${p.tipo} · ${activeCajas[0].icon} ${activeCajas[0].caja_name}${p.note?` · ${p.note}`:""}\n\n¿Confirmar?`);return;}
-      setDraft({tipo:p.tipo,amount:p.amount,caja:null,note:p.note});pushB(msgs,`${fmt(p.amount)} como ${p.tipo}. ¿En cuál caja?`);setFlow("pick_caja");return;}
+      setDraft({tipo:p.tipo,amount:p.amount,caja:null,note:p.note});pushB(msgs,`${fmt(p.amount)} como ${p.tipo}. ¿En cuál caja? (o "sin caja")`);setFlow("pick_caja");return;}
   };
 
   const startFlow=tipo=>{pushU(messages,tipo==="ingreso"?"💰 Ingreso":"💸 Salida");pushB(messages,"¿De cuánto?");setDraft({tipo,amount:null,caja:null,note:""});setFlow("pick_amount");};
   const pickAmt=v=>{pushU(messages,fmtS(v));setDraft(d=>({...d,amount:v}));
-    if(activeCajas.length===0){pushB(messages,"⚠️ No hay cajas.");setFlow("idle");return;}
+    if(activeCajas.length===0){setDraft(d=>({...d,amount:v,caja:null}));setFlow("confirm");pushB(messages,`${fmt(v)} · ${draft.tipo}\n\n¿Confirmar?`);return;}
     if(activeCajas.length===1){const c=activeCajas[0];setDraft(d=>({...d,amount:v,caja:c}));setFlow("confirm");pushB(messages,`${fmt(v)} · ${draft.tipo} · ${c.icon} ${c.caja_name}\n\n¿Confirmar?`);return;}
     pushB(messages,`${fmt(v)}. ¿En cuál caja?`);setFlow("pick_caja");};
   const pickType=tipo=>{pushU(messages,tipo==="ingreso"?"Ingreso":"Salida");setDraft(d=>({...d,tipo}));
+    if(activeCajas.length===0){setFlow("confirm");pushB(messages,`${fmt(draft.amount)} · ${tipo}\n\n¿Confirmar?`);return;}
     if(activeCajas.length===1){const c=activeCajas[0];setDraft(d=>({...d,tipo,caja:c}));setFlow("confirm");pushB(messages,`${fmt(draft.amount)} · ${tipo} · ${c.icon} ${c.caja_name}\n\n¿Confirmar?`);return;}
     pushB(messages,"¿En cuál caja?");setFlow("pick_caja");};
-  const pickCaja=c=>{pushU(messages,`${c.icon} ${c.caja_name}`);setDraft(d=>({...d,caja:c}));setFlow("confirm");pushB(messages,`${fmt(draft.amount)} · ${draft.tipo} · ${c.icon} ${c.caja_name}${draft.note?` · ${draft.note}`:""}\n\n¿Todo bien?`);};
+  const pickCaja=c=>{
+    if(c){pushU(messages,`${c.icon} ${c.caja_name}`);setDraft(d=>({...d,caja:c}));setFlow("confirm");pushB(messages,`${fmt(draft.amount)} · ${draft.tipo} · ${c.icon} ${c.caja_name}${draft.note?` · ${draft.note}`:""}\n\n¿Todo bien?`);}
+    else{pushU(messages,"💼 Sin caja");setDraft(d=>({...d,caja:null}));setFlow("confirm");pushB(messages,`${fmt(draft.amount)} · ${draft.tipo} · Sin caja${draft.note?` · ${draft.note}`:""}\n\n¿Todo bien?`);}
+  };
   const confirmF=()=>{pushU(messages,"✓ Confirmar");saveRec(draft.tipo,draft.amount,draft.caja,draft.note);};
   const cancelF=()=>{pushU(messages,"✕ Cancelar");pushB(messages,"Cancelado.");setFlow("idle");setDraft({tipo:null,amount:null,caja:null,note:""});};
   const logout=()=>{localStorage.removeItem("mc_user");location.reload();};
@@ -344,7 +364,7 @@ function MainApp({user}){
         flow==="idle"&&ce("div",{style:{display:"flex",gap:8,flexWrap:"wrap",justifyContent:"center"}},ce(Chip,{onClick:()=>startFlow("ingreso"),color:"#0d7a3e"},"💰 Ingreso"),ce(Chip,{onClick:()=>startFlow("salida"),color:"#c0392b"},"💸 Salida"),ce(Chip,{onClick:showSaldo,color:"#2980b9"},"📊 Saldo")),
         flow==="pick_type"&&ce("div",{style:{display:"flex",gap:8,justifyContent:"center"}},ce(Chip,{onClick:()=>pickType("ingreso"),color:"#0d7a3e"},"💰 Ingreso"),ce(Chip,{onClick:()=>pickType("salida"),color:"#c0392b"},"💸 Salida")),
         flow==="pick_amount"&&ce("div",{style:{display:"flex",gap:8,overflowX:"auto",padding:"2px 0"}},[5e5,1e6,2e6,3e6,5e6,10e6,15e6,20e6,50e6,1e8].map(v=>ce(Chip,{key:v,onClick:()=>pickAmt(v),color:"#0d7a3e"},fmtS(v)))),
-        flow==="pick_caja"&&ce("div",{style:{display:"flex",gap:8,overflowX:"auto",padding:"2px 0"}},activeCajas.map(c=>ce(Chip,{key:c.caja_id,onClick:()=>pickCaja(c),color:"#075e54"},`${c.icon} ${c.caja_name}`))),
+        flow==="pick_caja"&&ce("div",{style:{display:"flex",gap:8,overflowX:"auto",padding:"2px 0"}},activeCajas.map(c=>ce(Chip,{key:c.caja_id,onClick:()=>pickCaja(c),color:"#075e54"},`${c.icon} ${c.caja_name}`)),ce(Chip,{key:"none",onClick:()=>pickCaja(null),color:"#999"},"💼 Sin caja")),
         flow==="confirm"&&ce("div",{style:{display:"flex",gap:8,justifyContent:"center"}},ce(Chip,{onClick:confirmF,color:"#0d7a3e",active:true},"✓ Confirmar"),ce(Chip,{onClick:cancelF,color:"#999"},"✕ Cancelar"))),
       ce("div",{key:"ib",style:{display:"flex",alignItems:"center",gap:8,padding:"6px 10px 10px",background:"#f0ede8",flexShrink:0}},
         ce("input",{type:"text",style:{flex:1,padding:"11px 16px",border:"none",borderRadius:22,fontSize:15,fontFamily:F,background:"#fff",color:"#1a1a1a"},placeholder:"Escribe o usa los botones...",value:input,onChange:e=>setInput(e.target.value),onKeyDown:e=>{if(e.key==="Enter"){e.preventDefault();handleSend();}}}),
