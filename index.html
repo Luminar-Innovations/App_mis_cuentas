@@ -103,6 +103,14 @@ const API={
   },
   async createUser(name,username,pin,phone,createdBy){const{data,error}=await sb.from("users").insert({name,username:username.toLowerCase().trim(),pin_hash:pin,phone:phone||null,role:"colaborador",created_by:createdBy}).select().single();if(error)throw error;return data;},
   async toggleUser(id,active){await sb.from("users").update({is_active:active}).eq("id",id);},
+  // Chat persistence
+  async loadChat(userId){
+    const{data}=await sb.from("chat_logs").select("messages").eq("user_id",userId).single();
+    return data?.messages||[];
+  },
+  async saveChat(userId,messages){
+    await sb.from("chat_logs").upsert({user_id:userId,messages},{onConflict:"user_id"});
+  },
 };
 
 /* ═══ PARSER ═══ */
@@ -302,24 +310,37 @@ function MainApp({user}){
   const[records,setRecords]=useState([]);const[balance,setBalance]=useState(0);const[cajas,setCajas]=useState([]);
   const[loading,setLoading]=useState(true);const[input,setInput]=useState("");
   const[screen,setScreen]=useState("chat");const[flow,setFlow]=useState("idle");
-  const[draft,setDraft]=useState({tipo:null,amount:null,caja:null,note:""});
+  const[draft,setDraft]=useState({tipo:null,amount:null,caja:null,note:"",resolvedMethod:null});
   const[messages,setMessages]=useState([]);const[toast,setToast]=useState(null);
   const endRef=useRef(null);
   const sT=msg=>{setToast(msg);setTimeout(()=>setToast(null),2500);};
+  const chatSaveTimer=useRef(null);
 
   const refresh=useCallback(async()=>{
     const[txs,bal,cjs]=await Promise.all([API.getTx(user.id,user.role),API.getBalance(user.id,user.role),API.getCajas(user.id,user.role)]);
     setRecords(txs);setBalance(bal);setCajas(cjs);
   },[user.id,user.role]);
 
-  useEffect(()=>{refresh().then(()=>{
-    setMessages([{id:1,from:"bot",text:isA?`¡Hola ${user.name}! 👋 (Admin)\n\nRegistra movimientos en tus cajas.\nEscríbeme o usa los botones ⬇️`:`¡Hola ${user.name}! 👋\n\nEscríbeme o usa los botones:\n💰 Ingreso  💸 Salida  📊 Saldo`,date:new Date().toISOString()}]);
-    setLoading(false);});},[refresh]);
+  // Load chat from Supabase on init
+  useEffect(()=>{
+    Promise.all([refresh(),API.loadChat(user.id)]).then(([_,savedMsgs])=>{
+      const welcome={id:1,from:"bot",text:isA?`¡Hola ${user.name}! 👋 (Admin)\n\nRegistra movimientos en tus cajas.\nEscríbeme o usa los botones ⬇️`:`¡Hola ${user.name}! 👋\n\nRegistra salidas de tus cajas.\nEscríbeme o toca 💸 Salida ⬇️`,date:new Date().toISOString()};
+      if(savedMsgs&&savedMsgs.length>0){setMessages([...savedMsgs,welcome]);}
+      else{setMessages([welcome]);}
+      setLoading(false);
+    });
+  },[refresh]);
 
   useEffect(()=>{setTimeout(()=>endRef.current?.scrollIntoView({behavior:"smooth"}),50);},[messages,flow]);
 
-  const pushB=(prev,t)=>{const m=[...prev,{id:Date.now()+Math.random(),from:"bot",text:t,date:new Date().toISOString()}];setMessages(m);return m;};
-  const pushU=(prev,t)=>{const m=[...prev,{id:Date.now()+Math.random(),from:"user",text:t,date:new Date().toISOString()}];setMessages(m);return m;};
+  // Debounced chat save — saves 1 second after last message
+  const schedSave=(msgs)=>{
+    if(chatSaveTimer.current)clearTimeout(chatSaveTimer.current);
+    chatSaveTimer.current=setTimeout(()=>{API.saveChat(user.id,msgs.slice(-500));},1000);
+  };
+
+  const pushB=(prev,t)=>{const m=[...prev,{id:Date.now()+Math.random(),from:"bot",text:t,date:new Date().toISOString()}];setMessages(m);schedSave(m);return m;};
+  const pushU=(prev,t)=>{const m=[...prev,{id:Date.now()+Math.random(),from:"user",text:t,date:new Date().toISOString()}];setMessages(m);schedSave(m);return m;};
 
   const activeCajas=cajas.filter(c=>c.is_active);
 
@@ -327,8 +348,9 @@ function MainApp({user}){
     const method=draft.resolvedMethod||"efectivo";
     try{await API.addTx(user.id,tipo,amount,caja?.caja_id||null,note,method,"web");await refresh();
       const icon=tipo==="ingreso"?"✅":"📤",lab=tipo==="ingreso"?"INGRESO":"SALIDA";
-      const cajaLine=caja?`\n${caja.icon} ${caja.caja_name}`:(note?`\n📌 ${note}`:"");
-      pushB(messages,`${icon} ${lab} registrado\n\n💵 ${fmt(amount)}${cajaLine}\n👤 ${user.name}`);
+      const cajaLine=caja?`\n${caja.icon} ${caja.caja_name}`:(draft.note?`\n📌 ${draft.note}`:"");
+      const noteLine=note&&note!==draft.note?`\n📝 ${note}`:"";
+      pushB(messages,`${icon} ${lab} registrado\n\n💵 ${fmt(amount)}${cajaLine}${noteLine}\n👤 ${user.name}`);
     }catch(e){pushB(messages,"⚠️ Error: "+(e.message||"Intenta de nuevo."));}
     setFlow("idle");setDraft({tipo:null,amount:null,caja:null,note:"",resolvedMethod:null});
   };
@@ -370,9 +392,12 @@ function MainApp({user}){
   const handleSend=()=>{const text=input.trim();if(!text)return;setInput("");const msgs=pushU(messages,text);
     // Context-aware: if in a flow, handle within that context
     if(flow==="pick_type"){
-      if(/ingreso|entrada|entr|recib|cobr|lleg/i.test(text)){pickType("ingreso");return;}
+      if(/ingreso|entrada|entr|recib|cobr|lleg/i.test(text)){
+        if(!isA){pushB(msgs,"⚠️ Solo puedes registrar salidas. Toca el botón 💸 Salida.");return;}
+        pickType("ingreso");return;
+      }
       if(/salida|pago|gasto|pagu|compr|gast/i.test(text)){pickType("salida");return;}
-      pushB(msgs,`Registrando ${fmt(draft.amount)}.\n¿Es ingreso o salida? Toca un botón o escribe.`);return;
+      pushB(msgs,`Registrando ${fmt(draft.amount)}.\n${isA?"¿Es ingreso o salida?":"Confirma que es una salida."} Toca un botón o escribe.`);return;
     }
     if(flow==="pick_caja"){
       if(/sin\s*caja|ninguna|directo/i.test(text)){pickCaja(null);return;}
@@ -390,13 +415,34 @@ function MainApp({user}){
     if(flow==="confirm"){
       if(/^(si|sí|ok|confirmar|dale|listo|va|bien|yes|claro|hecho)$/i.test(text)){confirmF();return;}
       if(/^(no|cancelar|cancel|nop|nel)$/i.test(text)){cancelF();return;}
-      pushB(msgs,"Escribe \"sí\" para confirmar o \"no\" para cancelar.");return;
+      // Anything else in confirm = treat as note
+      setDraft(d=>({...d,note:text}));
+      const cLabel=draft.caja?`${draft.caja.icon} ${draft.caja.caja_name}`:(draft.note||"Sin caja");
+      pushB(msgs,`${fmt(draft.amount)} · ${draft.tipo} · ${cLabel}\n📝 ${text}\n\n¿Confirmar?`);
+      return;
+    }
+    if(flow==="add_note"){
+      setDraft(d=>({...d,note:text}));
+      const cLabel=draft.caja?`${draft.caja.icon} ${draft.caja.caja_name}`:(draft.note||"Sin caja");
+      setFlow("confirm");
+      pushB(msgs,`${fmt(draft.amount)} · ${draft.tipo} · ${cLabel}\n📝 ${text}\n\n¿Confirmar?`);
+      return;
     }
     const p=parseMsg(text);
     if(!p){pushB(msgs,"🤔 No entendí. Prueba:\n\"Entraron 5 millones\"\n\"Pagué 2M\"");return;}
     if(p.type==="saldo"){showSaldo();return;}
-    if(p.type==="need_type"){setDraft({tipo:null,amount:p.amount,caja:null,note:p.note});pushB(msgs,`${fmt(p.amount)}. ¿Es ingreso o salida?`);setFlow("pick_type");return;}
+    if(p.type==="need_type"){
+      if(!isA){
+        // Colaborador: auto-assign as salida, skip type selection
+        setDraft({tipo:"salida",amount:p.amount,caja:null,note:p.note});
+        if(activeCajas.length===0){setFlow("confirm");pushB(msgs,`${fmt(p.amount)} · salida${p.note?` · ${p.note}`:""}\n\n¿Confirmar?`);return;}
+        if(activeCajas.length===1){setDraft(d=>({...d,caja:activeCajas[0]}));setFlow("confirm");pushB(msgs,`${fmt(p.amount)} · salida · ${activeCajas[0].icon} ${activeCajas[0].caja_name}\n\n¿Confirmar?`);return;}
+        pushB(msgs,`${fmt(p.amount)} como salida.\n¿De cuál caja? ⬇️`);setFlow("pick_caja");return;
+      }
+      setDraft({tipo:null,amount:p.amount,caja:null,note:p.note});pushB(msgs,`${fmt(p.amount)}. ¿Es ingreso o salida?`);setFlow("pick_type");return;
+    }
     if(p.type==="need_caja"){
+      if(!isA&&p.tipo==="ingreso"){pushB(msgs,"⚠️ Solo puedes registrar salidas.");return;}
       if(activeCajas.length===0){setDraft({tipo:p.tipo,amount:p.amount,caja:null,note:p.note});setFlow("confirm");pushB(msgs,`${fmt(p.amount)} · ${p.tipo}${p.note?` · ${p.note}`:""}\n\n¿Confirmar?`);return;}
       if(activeCajas.length===1){setDraft({tipo:p.tipo,amount:p.amount,caja:activeCajas[0],note:p.note});setFlow("confirm");pushB(msgs,`${fmt(p.amount)} · ${p.tipo} · ${activeCajas[0].icon} ${activeCajas[0].caja_name}${p.note?` · ${p.note}`:""}\n\n¿Confirmar?`);return;}
       setDraft({tipo:p.tipo,amount:p.amount,caja:null,note:p.note});pushB(msgs,`${fmt(p.amount)} como ${p.tipo}.\n¿Dónde? Escribe el medio o elige una caja ⬇️`);setFlow("pick_caja");return;}
@@ -421,7 +467,7 @@ function MainApp({user}){
       pushB(messages,`${fmt(draft.amount)} · ${draft.tipo} · ${label}${draft.note&&!resolved?` · ${draft.note}`:""}\n\n¿Todo bien?`);
     }
   };
-  const confirmF=()=>{pushU(messages,"✓ Confirmar");saveRec(draft.tipo,draft.amount,draft.caja,draft.note);};
+  const confirmF=()=>{pushU(messages,"✓ Confirmar");saveRec(draft.tipo,draft.amount,draft.caja,draft.note||"");};
   const cancelF=()=>{pushU(messages,"✕ Cancelar");pushB(messages,"Cancelado.");setFlow("idle");setDraft({tipo:null,amount:null,caja:null,note:"",resolvedMethod:null});};
   const deleteTx=async(id)=>{
     if(!confirm("¿Eliminar este movimiento?"))return;
@@ -457,8 +503,13 @@ function MainApp({user}){
           return ce("div",{key:msg.id||i},show&&ce(DSep,{label:dl}),ce(Bubble,{from:msg.from,time:timeStr(msg.date)},msg.text));}),
         ce("div",{ref:endRef}))),
       ce("div",{key:"cp",style:{background:"#f0ede8",padding:"8px 12px",flexShrink:0,borderTop:"1px solid #ddd8cf"}},
-        flow==="idle"&&ce("div",{style:{display:"flex",gap:8,flexWrap:"wrap",justifyContent:"center"}},ce(Chip,{onClick:()=>startFlow("ingreso"),color:"#0d7a3e"},"💰 Ingreso"),ce(Chip,{onClick:()=>startFlow("salida"),color:"#c0392b"},"💸 Salida"),ce(Chip,{onClick:showSaldo,color:"#2980b9"},"📊 Saldo")),
-        flow==="pick_type"&&ce("div",{style:{display:"flex",gap:8,justifyContent:"center"}},ce(Chip,{onClick:()=>pickType("ingreso"),color:"#0d7a3e"},"💰 Ingreso"),ce(Chip,{onClick:()=>pickType("salida"),color:"#c0392b"},"💸 Salida")),
+        flow==="idle"&&ce("div",{style:{display:"flex",gap:8,flexWrap:"wrap",justifyContent:"center"}},
+          isA&&ce(Chip,{onClick:()=>startFlow("ingreso"),color:"#0d7a3e"},"💰 Ingreso"),
+          ce(Chip,{onClick:()=>startFlow("salida"),color:"#c0392b"},"💸 Salida"),
+          ce(Chip,{onClick:showSaldo,color:"#2980b9"},"📊 Saldo")),
+        flow==="pick_type"&&ce("div",{style:{display:"flex",gap:8,justifyContent:"center"}},
+          isA&&ce(Chip,{onClick:()=>pickType("ingreso"),color:"#0d7a3e"},"💰 Ingreso"),
+          ce(Chip,{onClick:()=>pickType("salida"),color:"#c0392b"},"💸 Salida")),
         flow==="pick_amount"&&ce("div",{style:{display:"flex",gap:8,overflowX:"auto",padding:"2px 0"}},[5e5,1e6,2e6,3e6,5e6,10e6,15e6,20e6,50e6,1e8].map(v=>ce(Chip,{key:v,onClick:()=>pickAmt(v),color:"#0d7a3e"},fmtS(v)))),
         flow==="pick_caja"&&ce("div",{style:{display:"flex",gap:8,overflowX:"auto",padding:"2px 0"}},
           activeCajas.map(c=>ce(Chip,{key:c.caja_id,onClick:()=>pickCaja(c),color:"#075e54"},`${c.icon} ${c.caja_name}`)),
@@ -467,7 +518,12 @@ function MainApp({user}){
           ce(Chip,{key:"dav",onClick:()=>{setDraft(d=>({...d,note:"Daviplata",resolvedMethod:"daviplata"}));pickCaja(null,{icon:"📲",label:"Daviplata"});},color:"#666"},"📲 Daviplata"),
           ce(Chip,{key:"ban",onClick:()=>{setDraft(d=>({...d,note:"Bancolombia",resolvedMethod:"transferencia"}));pickCaja(null,{icon:"🏦",label:"Bancolombia"});},color:"#666"},"🏦 Banco"),
           ce(Chip,{key:"none",onClick:()=>pickCaja(null),color:"#999"},"💼 Sin caja")),
-        flow==="confirm"&&ce("div",{style:{display:"flex",gap:8,justifyContent:"center"}},ce(Chip,{onClick:confirmF,color:"#0d7a3e",active:true},"✓ Confirmar"),ce(Chip,{onClick:cancelF,color:"#999"},"✕ Cancelar"))),
+        flow==="confirm"&&ce("div",{style:{display:"flex",gap:8,justifyContent:"center"}},
+          ce(Chip,{onClick:confirmF,color:"#0d7a3e",active:true},"✓ Confirmar"),
+          ce(Chip,{onClick:()=>{pushB(messages,"📝 Escribe la nota:");setFlow("add_note");},color:"#2980b9"},"📝 Nota"),
+          ce(Chip,{onClick:cancelF,color:"#999"},"✕ Cancelar")),
+        flow==="add_note"&&ce("div",{style:{display:"flex",gap:8,justifyContent:"center"}},
+          ce(Chip,{onClick:()=>{setFlow("confirm");pushB(messages,"OK, sin nota. ¿Confirmar?");},color:"#999"},"Saltar"))),
       ce("div",{key:"ib",style:{display:"flex",alignItems:"center",gap:8,padding:"6px 10px 10px",background:"#f0ede8",flexShrink:0}},
         ce("input",{type:"text",style:{flex:1,padding:"11px 16px",border:"none",borderRadius:22,fontSize:15,fontFamily:F,background:"#fff",color:"#1a1a1a"},placeholder:"Escribe o usa los botones...",value:input,onChange:e=>setInput(e.target.value),onKeyDown:e=>{if(e.key==="Enter"){e.preventDefault();handleSend();}}}),
         ce("button",{style:{width:44,height:44,borderRadius:"50%",border:"none",background:"#25d366",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,opacity:input.trim()?1:.35},onClick:handleSend,disabled:!input.trim()},
@@ -485,7 +541,7 @@ function MainApp({user}){
             ce("span",{style:{fontSize:14,fontWeight:800}},lb==="Hoy"||lb==="Ayer"?lb:`${ds[d.getDay()]} ${d.getDate()} ${ms[d.getMonth()]}`),
             ce("span",{style:{fontSize:12,fontWeight:700}},ce("span",{style:{color:"#0d7a3e"}},"+"+fmtS(dI))," · ",ce("span",{style:{color:"#c0392b"}},"−"+fmtS(dO)))),
           dr.map(r=>{const isIn=r.type==="ingreso";const cj=r.cajas;const uN=r.users?.name||"";
-            const canDelete=isA||(r.user_id===user.id);
+            const canDelete=isA;
             return ce("div",{key:r.id,style:{display:"flex",alignItems:"center",gap:10,background:"#fff",borderRadius:12,padding:"11px 12px",marginBottom:5,boxShadow:"0 1px 2px rgba(0,0,0,0.04)"}},
               ce("div",{style:{width:30,height:30,borderRadius:8,display:"flex",alignItems:"center",justifyContent:"center",color:"#fff",fontSize:14,fontWeight:700,flexShrink:0,background:isIn?"#0d7a3e":"#c0392b"}},isIn?"↓":"↑"),
               ce("div",{style:{flex:1}},
