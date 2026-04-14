@@ -38,21 +38,69 @@ const F="'DM Sans',system-ui,sans-serif";
 /* ═══ API ═══ */
 const API={
   async login(username,pin){
-    const{data}=await sb.from("users").select("id,name,username,phone,role")
+    const{data}=await sb.from("users").select("id,name,username,phone,role,created_by")
       .eq("username",username.toLowerCase().trim())
       .eq("pin_hash",pin)
       .eq("is_active",true).single();
     return data;
   },
-  async getTx(userId,role,limit=200){let q=sb.from("transactions").select("*,users!transactions_user_id_fkey(name),cajas(name,icon,type)").order("created_at",{ascending:false}).limit(limit);if(role!=="admin")q=q.eq("user_id",userId);const{data}=await q;return data||[];},
-  async addTx(userId,type,amount,cajaId,note="",method="efectivo",source="web"){const{data,error}=await sb.from("transactions").insert({user_id:userId,type,amount,method,caja_id:cajaId,note,source}).select().single();if(error)throw error;return data;},
-  async getBalance(userId,role){if(role==="admin"){const{data}=await sb.rpc("get_global_balance");return data||0;}const{data}=await sb.rpc("get_balance",{p_user_id:userId});return data||0;},
-  async getTodaySummary(userId,role){if(role==="admin"){const{data}=await sb.rpc("get_global_today_summary");return data?.[0]||{ingresos:0,salidas:0,movimientos:0,saldo:0};}const{data}=await sb.rpc("get_today_summary",{p_user_id:userId});return data?.[0]||{ingresos:0,salidas:0,movimientos:0,saldo:0};},
-  async getCajas(userId,role){let q=sb.from("caja_summary").select("*");if(role!=="admin")q=q.eq("assigned_to",userId);const{data}=await q;return data||[];},
-  async getAllCajas(){const{data}=await sb.from("cajas").select("*,users!cajas_assigned_to_fkey(name)").order("name");return data||[];},
+  // Admin: get team transactions. Colaborador: only their caja transactions
+  async getTx(userId,role,limit=200){
+    let q=sb.from("transactions").select("*,users!transactions_user_id_fkey(name),cajas(name,icon,type)").order("created_at",{ascending:false}).limit(limit);
+    if(role==="admin"){
+      // Get team member IDs first, then filter
+      const{data:teamUsers}=await sb.from("users").select("id").or(`id.eq.${userId},created_by.eq.${userId}`);
+      const ids=(teamUsers||[]).map(u=>u.id);
+      if(ids.length>0)q=q.in("user_id",ids);
+    }else{
+      // Colaborador: only transactions in their assigned cajas
+      const{data:myCajas}=await sb.from("cajas").select("id").eq("assigned_to",userId);
+      const cajaIds=(myCajas||[]).map(c=>c.id);
+      if(cajaIds.length>0)q=q.in("caja_id",cajaIds);
+      else q=q.eq("user_id",userId).is("caja_id",null); // fallback: own tx without caja
+    }
+    const{data}=await q;return data||[];
+  },
+  async addTx(userId,type,amount,cajaId,note="",method="efectivo",source="web"){
+    const{data,error}=await sb.from("transactions").insert({user_id:userId,type,amount,method,caja_id:cajaId||null,note,source}).select().single();
+    if(error)throw error;return data;
+  },
+  async deleteTx(id){
+    const{error}=await sb.from("transactions").delete().eq("id",id);
+    if(error)throw error;
+  },
+  // Balance: admin=team, colaborador=their cajas
+  async getBalance(userId,role){
+    if(role==="admin"){const{data}=await sb.rpc("get_team_balance",{p_admin_id:userId});return data||0;}
+    const{data}=await sb.rpc("get_colab_balance",{p_user_id:userId});return data||0;
+  },
+  async getTodaySummary(userId,role){
+    if(role==="admin"){const{data}=await sb.rpc("get_team_today_summary",{p_admin_id:userId});return data?.[0]||{ingresos:0,salidas:0,movimientos:0,saldo:0};}
+    const{data}=await sb.rpc("get_colab_today_summary",{p_user_id:userId});return data?.[0]||{ingresos:0,salidas:0,movimientos:0,saldo:0};
+  },
+  // Cajas: admin=cajas they created, colaborador=assigned to them
+  async getCajas(userId,role){
+    if(role==="admin"){
+      const{data}=await sb.from("caja_summary").select("*").eq("is_active",true);
+      // Filter to cajas created by this admin's team
+      return(data||[]).filter(c=>true); // TODO: when created_by is set properly, filter here
+    }
+    const{data}=await sb.from("caja_summary").select("*").eq("assigned_to",userId).eq("is_active",true);
+    return data||[];
+  },
+  async getAllCajas(adminId){
+    const{data}=await sb.from("cajas").select("*,users!cajas_assigned_to_fkey(name)").eq("created_by",adminId).order("name");
+    return data||[];
+  },
   async createCaja(name,type,icon,assignedTo,createdBy){const{data,error}=await sb.from("cajas").insert({name,type,icon:icon||"💰",assigned_to:assignedTo||null,created_by:createdBy}).select().single();if(error)throw error;return data;},
   async toggleCaja(id,active){await sb.from("cajas").update({is_active:active}).eq("id",id);},
-  async getUsers(){const{data}=await sb.from("users").select("id,name,username,role,phone,is_active,created_at").order("created_at");return data||[];},
+  // Users: admin only sees their team
+  async getUsers(adminId){
+    const{data}=await sb.from("users").select("id,name,username,role,phone,is_active,created_at")
+      .or(`id.eq.${adminId},created_by.eq.${adminId}`)
+      .order("created_at");
+    return data||[];
+  },
   async createUser(name,username,pin,phone,createdBy){const{data,error}=await sb.from("users").insert({name,username:username.toLowerCase().trim(),pin_hash:pin,phone:phone||null,role:"colaborador",created_by:createdBy}).select().single();if(error)throw error;return data;},
   async toggleUser(id,active){await sb.from("users").update({is_active:active}).eq("id",id);},
 };
@@ -152,7 +200,7 @@ function UsersScreen({adminId,onBack}){
   const[users,setUsers]=useState([]);const[ld,setLd]=useState(true);const[show,setShow]=useState(false);
   const[nn,setNn]=useState("");const[nu,setNu]=useState("");const[np,setNp]=useState("");const[nph,setNph]=useState("");
   const[saving,setSaving]=useState(false);const[toast,setToast]=useState(null);
-  const load=async()=>{setUsers(await API.getUsers());setLd(false);};
+  const load=async()=>{setUsers(await API.getUsers(adminId));setLd(false);};
   useEffect(()=>{load();},[]);
   const sT=m=>{setToast(m);setTimeout(()=>setToast(null),2500);};
 
@@ -210,7 +258,7 @@ function CajasScreen({adminId,onBack}){
   const[saving,setSaving]=useState(false);const[toast,setToast]=useState(null);
   const ICONS=["💰","🔐","💵","🏦","📱","📲","💳","🏠","🚗","📦"];
   const TYPES=[["efectivo","💵 Efectivo"],["banco","🏦 Banco"],["nequi","📱 Nequi"],["daviplata","📲 Daviplata"],["otro","💳 Otro"]];
-  const load=async()=>{const[c,u]=await Promise.all([API.getAllCajas(),API.getUsers()]);setCajas(c);setUsers(u.filter(u=>u.is_active));setLd(false);};
+  const load=async()=>{const[c,u]=await Promise.all([API.getAllCajas(adminId),API.getUsers(adminId)]);setCajas(c);setUsers(u.filter(u=>u.is_active));setLd(false);};
   useEffect(()=>{load();},[]);
   const sT=m=>{setToast(m);setTimeout(()=>setToast(null),2500);};
   const add=async()=>{if(!cn.trim())return;setSaving(true);try{await API.createCaja(cn.trim(),ct,ci,ca||null,adminId);setCn("");setCt("efectivo");setCi("💰");setCa("");setShow(false);sT("✅ Caja creada");await load();}catch(e){sT("⚠️ "+e.message);}setSaving(false);};
@@ -287,8 +335,8 @@ function MainApp({user}){
 
   const showSaldo=async()=>{
     const s=await API.getTodaySummary(user.id,user.role);
-    let t=`📊 Saldo ${isA?"global":""}:\n${s.saldo<0?"−":""}${fmt(s.saldo)}\n\n📅 Hoy:\n   ▲ ${fmt(s.ingresos)}  ▼ ${fmt(s.salidas)}  📋 ${s.movimientos}`;
-    if(activeCajas.length>0){t+="\n\n🗄️ Cajas:";activeCajas.forEach(c=>{t+=`\n   ${c.icon} ${c.caja_name}: ${c.saldo<0?"−":""}${fmt(c.saldo)}`;});}
+    let t=`📊 Saldo ${isA?"de mi equipo":"de mis cajas"}:\n${s.saldo<0?"−":""}${fmt(s.saldo)}\n\n📅 Hoy:\n   ▲ ${fmt(s.ingresos)}  ▼ ${fmt(s.salidas)}  📋 ${s.movimientos}`;
+    if(activeCajas.length>0){t+=`\n\n🗄️ ${isA?"Cajas":"Mis cajas"}:`;activeCajas.forEach(c=>{t+=`\n   ${c.icon} ${c.caja_name}: ${c.saldo<0?"−":""}${fmt(c.saldo)}`;});}
     pushB(messages,t);
   };
 
@@ -374,7 +422,11 @@ function MainApp({user}){
     }
   };
   const confirmF=()=>{pushU(messages,"✓ Confirmar");saveRec(draft.tipo,draft.amount,draft.caja,draft.note);};
-  const cancelF=()=>{pushU(messages,"✕ Cancelar");pushB(messages,"Cancelado.");setFlow("idle");setDraft({tipo:null,amount:null,caja:null,note:""});};
+  const cancelF=()=>{pushU(messages,"✕ Cancelar");pushB(messages,"Cancelado.");setFlow("idle");setDraft({tipo:null,amount:null,caja:null,note:"",resolvedMethod:null});};
+  const deleteTx=async(id)=>{
+    if(!confirm("¿Eliminar este movimiento?"))return;
+    try{await API.deleteTx(id);await refresh();sT("🗑️ Eliminado");}catch{sT("⚠️ Error al eliminar");}
+  };
   const logout=()=>{localStorage.removeItem("mc_user");location.reload();};
 
   const groupByDay=recs=>{const map={};recs.forEach(r=>{const k=r.created_at.slice(0,10);if(!map[k])map[k]=[];map[k].push(r);});return Object.entries(map).sort((a,b)=>b[0].localeCompare(a[0]));};
@@ -392,7 +444,7 @@ function MainApp({user}){
       screen==="history"?ce("button",{style:{background:"none",border:"none",color:"#fff",fontSize:28,cursor:"pointer",fontWeight:300,lineHeight:1},onClick:()=>setScreen("chat")},"‹"):ce("div",{style:{width:40,height:40,borderRadius:"50%",background:"#128c7e",display:"flex",alignItems:"center",justifyContent:"center",fontSize:20}},"💰"),
       ce("div",{style:{flex:1}},
         ce("div",{style:{color:"#fff",fontSize:17,fontWeight:700}},screen==="chat"?user.name:"Historial",isA&&screen==="chat"&&ce("span",{style:{fontSize:10,background:"rgba(255,255,255,0.2)",padding:"2px 8px",borderRadius:6,marginLeft:8}},"ADMIN")),
-        ce("div",{style:{color:"#a8d8c8",fontSize:13,fontWeight:600}},screen==="chat"?`Saldo${isA?" global":""}: ${balance<0?"−":""}${fmt(balance)}`:`${records.length} registros`)),
+        ce("div",{style:{color:"#a8d8c8",fontSize:13,fontWeight:600}},screen==="chat"?`Saldo${isA?" equipo":" mis cajas"}: ${balance<0?"−":""}${fmt(balance)}`:`${records.length} registros`)),
       screen==="chat"&&ce("div",{style:{display:"flex",gap:2}},
         isA&&ce("button",{style:{background:"none",border:"none",fontSize:20,cursor:"pointer",padding:"4px 6px"},onClick:()=>setScreen("cajas")},"🗄️"),
         isA&&ce("button",{style:{background:"none",border:"none",fontSize:20,cursor:"pointer",padding:"4px 6px"},onClick:()=>setScreen("users")},"👥"),
@@ -433,6 +485,7 @@ function MainApp({user}){
             ce("span",{style:{fontSize:14,fontWeight:800}},lb==="Hoy"||lb==="Ayer"?lb:`${ds[d.getDay()]} ${d.getDate()} ${ms[d.getMonth()]}`),
             ce("span",{style:{fontSize:12,fontWeight:700}},ce("span",{style:{color:"#0d7a3e"}},"+"+fmtS(dI))," · ",ce("span",{style:{color:"#c0392b"}},"−"+fmtS(dO)))),
           dr.map(r=>{const isIn=r.type==="ingreso";const cj=r.cajas;const uN=r.users?.name||"";
+            const canDelete=isA||(r.user_id===user.id);
             return ce("div",{key:r.id,style:{display:"flex",alignItems:"center",gap:10,background:"#fff",borderRadius:12,padding:"11px 12px",marginBottom:5,boxShadow:"0 1px 2px rgba(0,0,0,0.04)"}},
               ce("div",{style:{width:30,height:30,borderRadius:8,display:"flex",alignItems:"center",justifyContent:"center",color:"#fff",fontSize:14,fontWeight:700,flexShrink:0,background:isIn?"#0d7a3e":"#c0392b"}},isIn?"↓":"↑"),
               ce("div",{style:{flex:1}},
@@ -442,7 +495,8 @@ function MainApp({user}){
                   r.source==="whatsapp"&&ce("span",{style:{fontSize:10,background:"#dcf8c6",padding:"1px 6px",borderRadius:4,fontWeight:700,color:"#075e54"}},"WA")),
                 isA&&uN&&ce("div",{style:{fontSize:12,fontWeight:700,color:"#075e54",marginTop:1}},"👤 "+uN),
                 r.note&&ce("div",{style:{fontSize:13,color:"#777"}},r.note),
-                ce("div",{style:{fontSize:11,color:"#aaa"}},timeStr(r.created_at))));}));}))
+                ce("div",{style:{fontSize:11,color:"#aaa"}},timeStr(r.created_at))),
+              canDelete&&ce("button",{onClick:()=>deleteTx(r.id),style:{background:"none",border:"none",fontSize:16,cursor:"pointer",padding:"4px 8px",color:"#ccc",flexShrink:0}},"🗑️"));}));}))
   );
 }
 
