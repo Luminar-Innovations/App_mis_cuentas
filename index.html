@@ -368,6 +368,13 @@ function MainApp({user}){
     });
   },[refresh]);
 
+  // Realtime: auto-refresh when any transaction changes
+  useEffect(()=>{
+    const channel=sb.channel("tx-changes").on("postgres_changes",{event:"*",schema:"public",table:"transactions"},()=>{refresh();});
+    channel.subscribe();
+    return()=>{sb.removeChannel(channel);};
+  },[refresh]);
+
   useEffect(()=>{setTimeout(()=>endRef.current?.scrollIntoView({behavior:"smooth"}),50);},[messages,flow]);
 
   // Debounced chat save — saves 1 second after last message
