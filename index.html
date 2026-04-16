@@ -82,8 +82,10 @@ const API={
   async getCajas(userId,role){
     if(role==="admin"){
       const{data}=await sb.from("caja_summary").select("*").eq("is_active",true);
-      // Filter to cajas created by this admin's team
-      return(data||[]).filter(c=>true); // TODO: when created_by is set properly, filter here
+      // Filter to cajas created by this admin only
+      const{data:myCajas}=await sb.from("cajas").select("id").eq("created_by",userId);
+      const myIds=new Set((myCajas||[]).map(c=>c.id));
+      return(data||[]).filter(c=>myIds.has(c.caja_id));
     }
     const{data}=await sb.from("caja_summary").select("*").eq("assigned_to",userId).eq("is_active",true);
     return data||[];
